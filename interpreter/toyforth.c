@@ -86,9 +86,15 @@ typedef struct tfctx {
 void printStack(tfctx *ctx) {
     printf("Currently in stack:");
     printTfObj(ctx->stack);
-    printf("\n");
 };
 
+tfobj *listPop(tfobj *list);
+
+tfobj *stackPop(tfctx *ctx) {
+    tfobj *stack = ctx->stack;
+    assert(stack->type == TFOBJ_TYPE_LIST);
+    return listPop(stack);
+}
 
 /* ============ Allocation wrappers */
 
@@ -207,6 +213,19 @@ void listPush(tfobj *l, tfobj *element) {
     l->list.len++;
 }
 
+tfobj *listPop(tfobj *l) {
+    size_t current_len = l->list.len;
+    if (current_len == 0) return NULL;
+    tfobj *o = l->list.elements[current_len - 1];
+    if (l->list.len > 1) {
+        l->list.elements = xrealloc(l->list.elements, sizeof(tfobj *) * (current_len - 1));
+    } else {
+        l->list.elements[0] = NULL;
+    }
+    l->list.len--;
+    return o;
+}
+
 /* ============ Parser */
 
 typedef struct tfparser {
@@ -264,7 +283,7 @@ tfobj *compile(char *prg) {
     // loop until i find the null terminator
     //  each case is responsible for advancing the pointer
     while (parser.p) {
-        printf("parsing %s\n", parser.p);
+        printf("parsing \"%c\"\n", parser.p[0]);
         if (*parser.p == 0) break;
         tfobj *o;
         if (isspace(*parser.p)) {
@@ -284,7 +303,6 @@ tfobj *compile(char *prg) {
             printf("Unknow token at %s \n", token_start);
             parser.p++;
         } else {
-            printf("Pushing type %d\n", o->type);
             listPush(tokens, o);
             o->refcount++;
         }
@@ -339,7 +357,15 @@ void registerCFunction(tfctx *ctx, char *name,
 }
 
 void basicMathFunction(tfctx *ctx, tfobj *name) {
-    printf("TODO");
+    tfobj *first = listPop(ctx->stack);
+    tfobj *second = listPop(ctx->stack);
+    printf("Executing: %d %s %d\n", first->i, name->str.ptr, second->i);
+    tfobj *result = createIntObject(first->i + second->i);
+    listPush(ctx->stack, result);
+};
+
+void printFunction(tfctx *ctx, tfobj *name) {
+    printf("Result: \"%d\"\n", listPop(ctx->stack)->i);
 };
 
 void *createContext(void) {
@@ -350,6 +376,7 @@ void *createContext(void) {
     ctx->func_table->table = NULL;
     ctx->func_table->count = 0;
     registerCFunction(ctx, "+", basicMathFunction);
+    registerCFunction(ctx, "print", printFunction);
     return ctx;
 }
 
@@ -358,7 +385,7 @@ void *createContext(void) {
 
 /*Tries to resolve the symb associated to the current token and apply it on the currest stack state*/
 int execSymbol(tfctx *ctx, tfobj *token) {
-    printf("Executing \"%s\"\n", token->str.ptr);
+    printf("Looking for function \"%s\"\n", token->str.ptr);
     FuncEntry *func = getFunctionByName(ctx, token);
     if (func == NULL) {
         printf("Function not found\n");
@@ -366,7 +393,7 @@ int execSymbol(tfctx *ctx, tfobj *token) {
     }
 
     printf("Function \"%s\" found in table\n", func->name->str.ptr);
-
+    func->callback(ctx, token);
 
     return 0;
 }
