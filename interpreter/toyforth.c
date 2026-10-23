@@ -1,4 +1,5 @@
 // pt1 https://youtu.be/vYODKK8TQGE?list=PLrEMgOSrS_3cFJpM2gdw8EGFyRBZOyAKY&t=732
+#include <assert.h>
 #include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -39,10 +40,6 @@ typedef struct tfobj {
 } tfobj;
 
 
-typedef struct tfctx {
-    tfobj *stack;
-} tfctx;
-
 /* ============ Allocation wrappers */
 
 /* a wrapper around oom issues with malloc*/
@@ -55,6 +52,47 @@ void *xmalloc(size_t size) {
     return p;
 }
 
+void *xrealloc(void *oldptr, size_t size) {
+    void *p = realloc(oldptr, size);
+    if (!p) {
+        fprintf(stderr, "Out of Memory allocating %zu bytes\n", size);
+        exit(-1);
+    }
+    return p;
+};
+
+void release(tfobj *o) {
+    assert(o->refcount > 0);
+    o->refcount--;
+    if (o->refcount == 0) free(o);
+}
+
+void freeObject(tfobj *o) {
+    switch (o->type) {
+        case TFOBJ_TYPE_LIST:
+            printf("[");
+            for (size_t i = 0; i < o->list.len; i++) {
+                tfobj *item = o->list.elements[i];
+                release(item);
+                if (i != o->list.len - 1) printf(" ");
+            }
+            printf("]\n");
+            break;
+        case TFOBJ_TYPE_SYMB:
+        case TFOBJ_TYPE_STR:
+            free(o->str.ptr);
+            break;
+        default: ;
+    }
+    free(o);
+};
+
+
+void retain(tfobj *o) {
+    o->refcount++;
+}
+
+
 /* ============ Object related functions */
 
 /* Allocate and initialize a new Toy Forth object */
@@ -66,9 +104,6 @@ tfobj *createObject(int type) {
 }
 
 tfobj *createStringObject(char *s, size_t len) {
-#ifdef DEBUG
-    printf("creating string object of len %lu\n", len);
-#endif
     tfobj *o = createObject(TFOBJ_TYPE_STR);
     o->str.ptr = xmalloc(len + 1);
     o->str.len = len;
@@ -108,7 +143,7 @@ tfobj *createListObject() {
 /*push an element to a list. the ref count increment is demanded to the client*/
 void listPush(tfobj *l, tfobj *element) {
     size_t current_len = l->list.len;
-    l->list.elements = realloc(l->list.elements, sizeof(tfobj *) * (current_len + 1));
+    l->list.elements = xrealloc(l->list.elements, sizeof(tfobj *) * (current_len + 1));
     l->list.elements[current_len] = element;
     l->list.len++;
 #ifdef DEBUG
@@ -128,6 +163,7 @@ typedef struct tfparser {
 tfobj *parseInt(tfparser *parser) {
     char buf[MAX_INT_LEN];
     char *start = parser->p;
+    if (*parser->p == '-') parser->p++;
     while (*parser->p && isdigit(*parser->p)) parser->p++;
     // pointers are numbers and i can subtract them to know the space the number occupies
     int numlen = parser->p - start;
@@ -173,7 +209,7 @@ tfobj *compile(char *prg) {
         char *token_start = parser.p;
         if (*parser.p == 0) break;
         if (isspace(*parser.p)) continue;
-        if (isdigit(*parser.p)) {
+        if (isdigit(*parser.p) || (*parser.p == '-' && isdigit(parser.p[1]))) {
             o = parseInt(&parser);
         } else if (is_valid_symbol(*parser.p)) {
             o = parseSymbol(&parser);
@@ -181,6 +217,7 @@ tfobj *compile(char *prg) {
             o = NULL;
         }
         if (o == NULL) {
+            release(tokens);
             printf("Unknow token at %s \n", token_start);
         } else {
             listPush(tokens, o);
@@ -192,7 +229,7 @@ tfobj *compile(char *prg) {
     return tokens;
 }
 
-/* ============ Execute */
+/* ============ Utilities */
 
 void print(tfobj *o) {
     switch (o->type) {
@@ -216,6 +253,62 @@ void print(tfobj *o) {
             break;
     }
 };
+
+/* ============ Function Table */
+
+
+
+typedef struct tfctx {
+    tfobj *stack;
+} tfctx;
+
+
+struct FunctionTableEntry {
+    tfobj *name;
+    void (*callback)(tfctx *ctx, tfobj *);
+};
+
+
+/*Tries to resolve the symb associated to the current token and apply it on the currest stack state*/
+void execSymbol(tfctx *ctx, tfobj *tfobj) {
+};
+
+
+/* ============ Execute */
+
+void *createContext(void) {
+    tfctx *ctx = xmalloc(sizeof(*ctx));
+    ctx->stack = createListObject();
+    return ctx;
+}
+
+void exec(tfctx *ctx, tfobj *prg) {
+#ifdef DEBUG
+    printf("Executing :");
+    print(prg);
+    printf("\n");
+#endif
+    // invariant of our system, our prg has to be a list
+    assert(prg != NULL && prg->type == TFOBJ_TYPE_LIST);
+    for (size_t i = 0; i < prg->list.len; i++) {
+        tfobj *token = prg->list.elements[i];
+        switch (token->type) {
+            case TFOBJ_TYPE_SYMB:
+                execSymbol(ctx, token);
+                retain(token);
+                break;
+            //all the other token type except of lists ans symb are pushed to the stack
+            default:
+                listPush(ctx->stack, token);
+                break;
+        }
+#ifdef DEBUG
+        printf("Currently in stack:");
+        print(ctx->stack);
+        printf("\n");
+#endif
+    }
+}
 
 /* ============ Main */
 
@@ -250,7 +343,10 @@ int main(int argc, char **argv) {
 #endif
 
     tfobj *prg = compile(prgtext);
-    print(prg);
+    // print(prg);
+    tfctx *ctx = createContext();
+    exec(ctx, prg);
+
 
     fclose(f);
 
