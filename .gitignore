@@ -1,0 +1,10 @@
+# Ignore everything (compiled binaries have no extension), then allow sources
+*
+!*/
+!*.c
+!*.h
+!.gitignore
+!README.md
+!**/tests/*
+.idea/
+.DS_Store
