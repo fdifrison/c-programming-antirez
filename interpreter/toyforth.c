@@ -39,6 +39,56 @@ typedef struct tfobj {
     };
 } tfobj;
 
+void printTfObj(tfobj *o) {
+    switch (o->type) {
+        case TFOBJ_TYPE_INT:
+            printf("%d", o->i);
+            break;
+        case TFOBJ_TYPE_SYMB:
+            printf("%s", o->str.ptr);
+            break;
+        case TFOBJ_TYPE_LIST:
+            printf("[");
+            for (size_t i = 0; i < o->list.len; i++) {
+                tfobj *item = o->list.elements[i];
+                printTfObj(item);
+                if (i != o->list.len - 1) printf(" ");
+            }
+            printf("]\n");
+            break;
+        default:
+            printf("??");
+            break;
+    }
+};
+
+struct tfctx;
+
+typedef struct FunctionTableEntry {
+    tfobj *name;
+
+    void (*callback)(struct tfctx *ctx, tfobj *name);
+
+    // user defined functions
+    tfobj *user_func;
+} FuncEntry;
+
+typedef struct FunctionTable {
+    FuncEntry **table;
+    size_t count;
+} FuncTable;
+
+typedef struct tfctx {
+    tfobj *stack;
+    FuncTable *func_table;
+} tfctx;
+
+void printStack(tfctx *ctx) {
+    printf("Currently in stack:");
+    printTfObj(ctx->stack);
+    printf("\n");
+};
+
 
 /* ============ Allocation wrappers */
 
@@ -62,6 +112,9 @@ void *xrealloc(void *oldptr, size_t size) {
 };
 
 void release(tfobj *o) {
+#ifdef DEBUG
+    printf("Releasing %p\n", o);
+#endif
     assert(o->refcount > 0);
     o->refcount--;
     if (o->refcount == 0) free(o);
@@ -112,6 +165,12 @@ tfobj *createStringObject(char *s, size_t len) {
     return o;
 }
 
+/* return 0 il string are the same, 1 otherwise*/
+int compareStringObject(tfobj *a, tfobj *b) {
+    if (a->str.len != b->str.len) return 1;
+    return memcmp(a->str.ptr, b->str.ptr, b->str.len);
+}
+
 tfobj *createSymbObject(char *s, size_t len) {
     tfobj *o = createStringObject(s, len);
     o->type = TFOBJ_TYPE_SYMB;
@@ -146,9 +205,6 @@ void listPush(tfobj *l, tfobj *element) {
     l->list.elements = xrealloc(l->list.elements, sizeof(tfobj *) * (current_len + 1));
     l->list.elements[current_len] = element;
     l->list.len++;
-#ifdef DEBUG
-    printf("List len is %lu\n", current_len + 1);
-#endif
 }
 
 /* ============ Parser */
@@ -176,13 +232,14 @@ tfobj *parseInt(tfparser *parser) {
 int is_valid_symbol(int c) {
     char symbols[] = "+-/*%";
     if (isalpha(c)) return 1;
+    if (c == 0) return 0;
     if (strchr(symbols, c) != NULL) return 1;
     return 0;
 }
 
 tfobj *parseSymbol(tfparser *parser) {
     char *start = parser->p;
-    while (parser->p && is_valid_symbol(*parser->p)) parser->p++;
+    while (parser->p[0] && is_valid_symbol(*parser->p)) parser->p++;
     int numlen = parser->p - start;
     return createSymbObject(start, numlen);
 };
@@ -203,12 +260,17 @@ tfobj *compile(char *prg) {
 
     tfobj *tokens = createListObject();
 
+    char *token_start = parser.p;
     // loop until i find the null terminator
+    //  each case is responsible for advancing the pointer
     while (parser.p) {
-        tfobj *o;
-        char *token_start = parser.p;
+        printf("parsing %s\n", parser.p);
         if (*parser.p == 0) break;
-        if (isspace(*parser.p)) continue;
+        tfobj *o;
+        if (isspace(*parser.p)) {
+            parser.p++;
+            continue ;
+        }
         if (isdigit(*parser.p) || (*parser.p == '-' && isdigit(parser.p[1]))) {
             o = parseInt(&parser);
         } else if (is_valid_symbol(*parser.p)) {
@@ -217,75 +279,103 @@ tfobj *compile(char *prg) {
             o = NULL;
         }
         if (o == NULL) {
+            printf("Error compiling %s\n", parser.p);
             release(tokens);
             printf("Unknow token at %s \n", token_start);
+            parser.p++;
         } else {
+            printf("Pushing type %d\n", o->type);
             listPush(tokens, o);
             o->refcount++;
         }
-
-        parser.p++;
     }
+    printf("Finished compilation\n");
     return tokens;
 }
 
-/* ============ Utilities */
-
-void print(tfobj *o) {
-    switch (o->type) {
-        case TFOBJ_TYPE_INT:
-            printf("%d", o->i);
-            break;
-        case TFOBJ_TYPE_SYMB:
-            printf("%s", o->str.ptr);
-            break;
-        case TFOBJ_TYPE_LIST:
-            printf("[");
-            for (size_t i = 0; i < o->list.len; i++) {
-                tfobj *item = o->list.elements[i];
-                print(item);
-                if (i != o->list.len - 1) printf(" ");
-            }
-            printf("]\n");
-            break;
-        default:
-            printf("??");
-            break;
-    }
-};
-
 /* ============ Function Table */
 
+FuncEntry *getFunctionByName(tfctx *ctx, tfobj *name) {
+    for (size_t i = 0; i < ctx->func_table->count; i++) {
+        FuncEntry *fn = ctx->func_table->table[i];
+        if (compareStringObject(fn->name, name) == 0) return fn;
+    }
+    return NULL;
+}
 
-
-typedef struct tfctx {
-    tfobj *stack;
-} tfctx;
-
-
-struct FunctionTableEntry {
-    tfobj *name;
-    void (*callback)(tfctx *ctx, tfobj *);
+/*Push a function entry into the ctx demanding toi the user to either set
+ *a C callback or a list representing a user defined function*/
+FuncEntry *registerUserFunction(tfctx *ctx, tfobj *name) {
+    ctx->func_table->table = xrealloc(ctx->func_table->table,
+                                      sizeof(FuncEntry *) * (ctx->func_table->count + 1));
+    FuncEntry *new_fn = xmalloc(sizeof(FuncEntry));
+    ctx->func_table->table[ctx->func_table->count] = new_fn;
+    ctx->func_table->count++;
+    new_fn->name = name;
+    retain(name);
+    new_fn->callback = NULL;
+    new_fn->user_func = NULL;
+    return new_fn;
 };
 
+/*Register a new function with a given name. if a name already exist it gets replaced*/
+void registerCFunction(tfctx *ctx, char *name,
+                       void (*func_callback)(tfctx *ctx, tfobj *name)) {
+    printf("Registering function %s\n", name);
+    FuncEntry *fn;
+    tfobj *func_name = createStringObject(name, strlen(name));
+    fn = getFunctionByName(ctx, func_name);
+    if (fn) {
+        if (fn->user_func) {
+            release(fn->user_func);
+            fn->user_func = NULL;
+        }
+        fn->callback = func_callback;
+    } else {
+        fn = registerUserFunction(ctx, func_name);
+        fn->callback = func_callback;
+    }
+    release(func_name);
+}
 
-/*Tries to resolve the symb associated to the current token and apply it on the currest stack state*/
-void execSymbol(tfctx *ctx, tfobj *tfobj) {
+void basicMathFunction(tfctx *ctx, tfobj *name) {
+    printf("TODO");
 };
+
+void *createContext(void) {
+    printf("Creating context\n");
+    tfctx *ctx = xmalloc(sizeof(*ctx));
+    ctx->stack = createListObject();
+    ctx->func_table = xmalloc(sizeof(*ctx->func_table));
+    ctx->func_table->table = NULL;
+    ctx->func_table->count = 0;
+    registerCFunction(ctx, "+", basicMathFunction);
+    return ctx;
+}
 
 
 /* ============ Execute */
 
-void *createContext(void) {
-    tfctx *ctx = xmalloc(sizeof(*ctx));
-    ctx->stack = createListObject();
-    return ctx;
+/*Tries to resolve the symb associated to the current token and apply it on the currest stack state*/
+int execSymbol(tfctx *ctx, tfobj *token) {
+    printf("Executing \"%s\"\n", token->str.ptr);
+    FuncEntry *func = getFunctionByName(ctx, token);
+    if (func == NULL) {
+        printf("Function not found\n");
+        return 1;
+    }
+
+    printf("Function \"%s\" found in table\n", func->name->str.ptr);
+
+
+    return 0;
 }
+
 
 void exec(tfctx *ctx, tfobj *prg) {
 #ifdef DEBUG
     printf("Executing :");
-    print(prg);
+    printTfObj(prg);
     printf("\n");
 #endif
     // invariant of our system, our prg has to be a list
@@ -303,12 +393,11 @@ void exec(tfctx *ctx, tfobj *prg) {
                 break;
         }
 #ifdef DEBUG
-        printf("Currently in stack:");
-        print(ctx->stack);
-        printf("\n");
+        printStack(ctx);
 #endif
     }
 }
+
 
 /* ============ Main */
 
