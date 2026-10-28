@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TF_OK 0
+#define TF_ERR 1
 
 #define TFOBJ_TYPE_INT 0
 #define TFOBJ_TYPE_STR 1
@@ -67,7 +69,7 @@ struct tfctx;
 typedef struct FunctionTableEntry {
     tfobj *name;
 
-    void (*callback)(struct tfctx *ctx, tfobj *name);
+    int (*callback)(struct tfctx *ctx, char *name);
 
     // user defined functions
     tfobj *user_func;
@@ -216,14 +218,15 @@ void listPush(tfobj *l, tfobj *element) {
 tfobj *listPop(tfobj *l) {
     size_t current_len = l->list.len;
     if (current_len == 0) return NULL;
-    tfobj *o = l->list.elements[current_len - 1];
+    tfobj *pop = l->list.elements[current_len - 1];
     if (l->list.len > 1) {
         l->list.elements = xrealloc(l->list.elements, sizeof(tfobj *) * (current_len - 1));
     } else {
-        l->list.elements[0] = NULL;
+        free(l->list.elements);
+        l->list.elements = NULL;
     }
     l->list.len--;
-    return o;
+    return pop;
 }
 
 /* ============ Parser */
@@ -338,7 +341,7 @@ FuncEntry *registerUserFunction(tfctx *ctx, tfobj *name) {
 
 /*Register a new function with a given name. if a name already exist it gets replaced*/
 void registerCFunction(tfctx *ctx, char *name,
-                       void (*func_callback)(tfctx *ctx, tfobj *name)) {
+                       int (*func_callback)(tfctx *ctx, char *name)) {
     printf("Registering function %s\n", name);
     FuncEntry *fn;
     tfobj *func_name = createStringObject(name, strlen(name));
@@ -356,16 +359,38 @@ void registerCFunction(tfctx *ctx, char *name,
     release(func_name);
 }
 
-void basicMathFunction(tfctx *ctx, tfobj *name) {
-    tfobj *first = listPop(ctx->stack);
-    tfobj *second = listPop(ctx->stack);
-    printf("Executing: %d %s %d\n", first->i, name->str.ptr, second->i);
-    tfobj *result = createIntObject(first->i + second->i);
-    listPush(ctx->stack, result);
+int basicMathFunction(tfctx *ctx, char *name) {
+    tfobj *a = listPop(ctx->stack);
+    tfobj *b = listPop(ctx->stack);
+    printf("Executing: %d %s %d\n", b->i, &name[0], a->i);
+
+    int result;
+    switch (name[0]) {
+        case '+': result = b->i + a->i;
+            break;
+        case '*': result = b->i * a->i;
+            break;
+        case '-': result = b->i - a->i;
+            break;
+        default: result = TF_ERR;
+            printf("Unknown function name\n");
+            return result;
+            break;
+    }
+    release(a);
+    release(b);
+
+    listPush(ctx->stack, createIntObject(result));
+    return TF_OK;
 };
 
-void printFunction(tfctx *ctx, tfobj *name) {
-    printf("Result: \"%d\"\n", listPop(ctx->stack)->i);
+int symbFunction(tfctx *ctx, char *name) {
+    if (strcmp(name, "print") == 0) {
+        printf("Result: \"%d\"\n", listPop(ctx->stack)->i);
+    } else {
+        return TF_ERR;
+    }
+    return TF_OK;
 };
 
 void *createContext(void) {
@@ -376,7 +401,9 @@ void *createContext(void) {
     ctx->func_table->table = NULL;
     ctx->func_table->count = 0;
     registerCFunction(ctx, "+", basicMathFunction);
-    registerCFunction(ctx, "print", printFunction);
+    registerCFunction(ctx, "*", basicMathFunction);
+    registerCFunction(ctx, "-", basicMathFunction);
+    registerCFunction(ctx, "print", symbFunction);
     return ctx;
 }
 
@@ -389,17 +416,19 @@ int execSymbol(tfctx *ctx, tfobj *token) {
     FuncEntry *func = getFunctionByName(ctx, token);
     if (func == NULL) {
         printf("Function not found\n");
-        return 1;
+        return TF_ERR;
+    }
+    if (func->user_func) {
+        // TODO implement
+        return TF_ERR;
     }
 
     printf("Function \"%s\" found in table\n", func->name->str.ptr);
-    func->callback(ctx, token);
-
-    return 0;
+    return func->callback(ctx, token->str.ptr);
 }
 
 
-void exec(tfctx *ctx, tfobj *prg) {
+int exec(tfctx *ctx, tfobj *prg) {
 #ifdef DEBUG
     printf("Executing :");
     printTfObj(prg);
@@ -411,18 +440,23 @@ void exec(tfctx *ctx, tfobj *prg) {
         tfobj *token = prg->list.elements[i];
         switch (token->type) {
             case TFOBJ_TYPE_SYMB:
-                execSymbol(ctx, token);
+                if (execSymbol(ctx, token) == TF_ERR) {
+                    perror("Run time error");
+                    return TF_ERR;
+                };
                 retain(token);
                 break;
             //all the other token type except of lists ans symb are pushed to the stack
             default:
                 listPush(ctx->stack, token);
+                retain(token);
                 break;
         }
 #ifdef DEBUG
         printStack(ctx);
 #endif
     }
+    return TF_OK;
 }
 
 
@@ -461,8 +495,11 @@ int main(int argc, char **argv) {
     tfobj *prg = compile(prgtext);
     // print(prg);
     tfctx *ctx = createContext();
-    exec(ctx, prg);
+    int result = exec(ctx, prg);
 
+    if (result == TF_ERR) {
+        perror("Run time error");
+    }
 
     fclose(f);
 
